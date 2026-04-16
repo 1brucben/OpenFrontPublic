@@ -233,6 +233,37 @@ export async function startWorker() {
     });
   });
 
+  app.post("/api/game/:id/reserve", async (req, res) => {
+    const gameID = req.params.id;
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Authorization header required" });
+    }
+
+    const token = authHeader.substring("Bearer ".length);
+    const result = await verifyClientToken(token, config);
+    if (result.type === "error") {
+      log.warn(`Invalid reservation token: ${result.message}`, {
+        gameID,
+      });
+      return res.status(401).json({ error: "Invalid token" });
+    }
+
+    const reservation = gm.reserveSlot(gameID, result.persistentId);
+    if (reservation.type === "not_found") {
+      return res.status(404).json({ error: "Game not found" });
+    }
+    if (reservation.type === "rejected") {
+      return res.status(409).json({ error: "Lobby full" });
+    }
+
+    return res.json({
+      token: reservation.token,
+      expiresAt: reservation.expiresAt,
+    });
+  });
+
   app.get("/api/game/:id", async (req, res) => {
     const game = gm.game(req.params.id);
     if (game === null) {
@@ -488,7 +519,11 @@ export async function startWorker() {
           cosmeticResult.cosmetics,
         );
 
-        const joinResult = gm.joinClient(client, clientMsg.gameID);
+        const joinResult = gm.joinClient(
+          client,
+          clientMsg.gameID,
+          clientMsg.reservationToken,
+        );
 
         if (joinResult === "not_found") {
           log.info(`game ${clientMsg.gameID} not found on worker ${workerId}`);

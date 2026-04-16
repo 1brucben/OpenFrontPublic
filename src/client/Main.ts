@@ -18,7 +18,7 @@ import {
 } from "../core/game/UserSettings";
 import "./AccountModal";
 import { getUserMe } from "./Api";
-import { userAuth } from "./Auth";
+import { getPlayToken, userAuth } from "./Auth";
 import { joinLobby, type JoinLobbyResult } from "./ClientGameRunner";
 import { getPlayerCosmeticsRefs } from "./Cosmetics";
 import { crazyGamesSDK } from "./CrazyGamesSDK";
@@ -755,6 +755,27 @@ class Client {
       this.joinModal?.open(lobby.gameID, lobby.publicLobbyInfo);
     }
     const config = await getRuntimeClientServerConfig();
+    let reservationToken: string | undefined;
+    if (lobby.source === "public") {
+      const reservation = await this.reservePublicLobbySlot(
+        lobby.gameID,
+        config,
+      );
+      if (reservation.status === "full") {
+        this.joinModal?.close();
+        window.dispatchEvent(
+          new CustomEvent("show-message", {
+            detail: {
+              message: translateText("public_lobby.join_timeout"),
+              color: "red",
+              duration: 3500,
+            },
+          }),
+        );
+        return;
+      }
+      reservationToken = reservation.token;
+    }
     // Only update URL immediately for private lobbies, not public ones
     if (lobby.source !== "public") {
       this.updateJoinUrlForShare(lobby.gameID, config);
@@ -764,6 +785,7 @@ class Client {
       serverConfig: config,
       cosmetics: await getPlayerCosmeticsRefs(),
       turnstileToken: await this.getTurnstileToken(lobby),
+      reservationToken,
       playerName: this.usernameInput?.getUsername() ?? genAnonUsername(),
       playerClanTag: this.usernameInput?.getClanTag() ?? null,
       gameStartInfo: lobby.gameStartInfo ?? lobby.gameRecord?.info,
@@ -975,6 +997,52 @@ class Client {
       console.log("Turnstile token expired, getting new token");
       return (await getTurnstileToken())?.token ?? null;
     }
+  }
+
+  private async reservePublicLobbySlot(
+    lobbyId: string,
+    config: Awaited<ReturnType<typeof getRuntimeClientServerConfig>>,
+  ): Promise<{ status: "reserved"; token?: string } | { status: "full" }> {
+    try {
+      const response = await fetch(
+        `/${config.workerPath(lobbyId)}/api/game/${lobbyId}/reserve`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await getPlayToken()}`,
+          },
+        },
+      );
+
+      if (response.ok) {
+        const body = (await response.json()) as { token?: unknown };
+        if (typeof body.token === "string" && body.token.length > 0) {
+          return { status: "reserved", token: body.token };
+        }
+      }
+
+      if (response.status !== 409 && response.status !== 404) {
+        console.warn(
+          "Lobby reservation unavailable, continuing without reservation",
+          {
+            lobbyId,
+            status: response.status,
+          },
+        );
+        return { status: "reserved" };
+      }
+    } catch (error) {
+      console.warn(
+        "Failed to reserve public lobby slot, continuing without reservation",
+        {
+          lobbyId,
+          error,
+        },
+      );
+      return { status: "reserved" };
+    }
+
+    return { status: "full" };
   }
 }
 

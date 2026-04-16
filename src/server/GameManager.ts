@@ -35,10 +35,23 @@ export class GameManager {
   joinClient(
     client: Client,
     gameID: GameID,
+    reservationToken?: string,
   ): "joined" | "kicked" | "rejected" | "not_found" {
     const game = this.games.get(gameID);
     if (!game) return "not_found";
-    return game.joinClient(client);
+    return game.joinClient(client, reservationToken);
+  }
+
+  reserveSlot(
+    gameID: GameID,
+    persistentID: string,
+  ):
+    | { type: "reserved"; token: string; expiresAt: number }
+    | { type: "rejected" }
+    | { type: "not_found" } {
+    const game = this.games.get(gameID);
+    if (!game) return { type: "not_found" };
+    return game.reserveSlot(persistentID);
   }
 
   rejoinClient(

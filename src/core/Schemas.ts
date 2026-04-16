@@ -665,6 +665,7 @@ export const ClientJoinMessageSchema = z.object({
   // Server replaces the refs with the actual cosmetic data.
   cosmetics: PlayerCosmeticRefsSchema.optional(),
   turnstileToken: z.string().nullable(),
+  reservationToken: z.string().optional(),
 });
 
 export const ClientRejoinMessageSchema = z.object({

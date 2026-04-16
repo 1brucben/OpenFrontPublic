@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import ipAnonymize from "ip-anonymize";
 import { Logger } from "winston";
 import WebSocket from "ws";
@@ -89,6 +90,11 @@ export class GameServer {
   private lobbyInfoIntervalId: ReturnType<typeof setInterval> | null = null;
 
   private visibleAt?: number;
+  private readonly reservationTtlMs = 8_000;
+  private readonly reservations = new Map<
+    string,
+    { token: string; expiresAt: number }
+  >();
 
   constructor(
     public readonly id: string,
@@ -193,14 +199,28 @@ export class GameServer {
     return clientID;
   }
 
-  public joinClient(client: Client): "joined" | "kicked" | "rejected" {
+  public joinClient(
+    client: Client,
+    reservationToken?: string,
+  ): "joined" | "kicked" | "rejected" {
+    this.cleanupExpiredReservations();
+
     if (this.kickedPersistentIds.has(client.persistentID)) {
       return "kicked";
     }
 
+    const hasReservation = this.hasValidReservation(
+      client.persistentID,
+      reservationToken,
+    );
+
     if (
       this.gameConfig.maxPlayers &&
-      this.activeClients.length >= this.gameConfig.maxPlayers
+      this.activeClients.length +
+        this.numReservedSlots(
+          hasReservation ? client.persistentID : undefined,
+        ) >=
+        this.gameConfig.maxPlayers
     ) {
       this.log.warn(`cannot add client, game full`, {
         clientID: client.clientID,
@@ -256,6 +276,9 @@ export class GameServer {
     }
 
     // Client connection accepted
+    if (hasReservation) {
+      this.reservations.delete(client.persistentID);
+    }
     this.websockets.add(client.ws);
     this.persistentIdToClientId.set(client.persistentID, client.clientID);
     this.activeClients.push(client);
@@ -600,7 +623,51 @@ export class GameServer {
   }
 
   public numClients(): number {
-    return this.activeClients.length;
+    this.cleanupExpiredReservations();
+    if (!this.isPublic() || this.hasStarted()) {
+      return this.activeClients.length;
+    }
+    return this.activeClients.length + this.numReservedSlots();
+  }
+
+  public reserveSlot(
+    persistentID: string,
+  ):
+    | { type: "reserved"; token: string; expiresAt: number }
+    | { type: "rejected" } {
+    this.cleanupExpiredReservations();
+
+    if (!this.isPublic() || this.hasStarted() || this._hasEnded) {
+      return { type: "rejected" };
+    }
+
+    const existingReservation = this.reservations.get(persistentID);
+    if (existingReservation && existingReservation.expiresAt > Date.now()) {
+      return {
+        type: "reserved",
+        token: existingReservation.token,
+        expiresAt: existingReservation.expiresAt,
+      };
+    }
+
+    if (
+      this.gameConfig.maxPlayers !== undefined &&
+      this.activeClients.length + this.numReservedSlots() >=
+        this.gameConfig.maxPlayers
+    ) {
+      return { type: "rejected" };
+    }
+
+    const reservation = {
+      token: randomUUID(),
+      expiresAt: Date.now() + this.reservationTtlMs,
+    };
+    this.reservations.set(persistentID, reservation);
+    return {
+      type: "reserved",
+      token: reservation.token,
+      expiresAt: reservation.expiresAt,
+    };
   }
 
   public numDesyncedClients(): number {
@@ -922,6 +989,41 @@ export class GameServer {
       serverTime: Date.now(),
       publicGameType: this.publicGameType,
     };
+  }
+
+  private cleanupExpiredReservations(): void {
+    if (this.reservations.size === 0) {
+      return;
+    }
+
+    const now = Date.now();
+    for (const [persistentID, reservation] of this.reservations.entries()) {
+      if (reservation.expiresAt <= now) {
+        this.reservations.delete(persistentID);
+      }
+    }
+  }
+
+  private hasValidReservation(
+    persistentID: string,
+    reservationToken?: string,
+  ): boolean {
+    if (!reservationToken) {
+      return false;
+    }
+
+    const reservation = this.reservations.get(persistentID);
+    return reservation?.token === reservationToken;
+  }
+
+  private numReservedSlots(excludePersistentID?: string): number {
+    let total = 0;
+    for (const persistentID of this.reservations.keys()) {
+      if (persistentID !== excludePersistentID) {
+        total++;
+      }
+    }
+    return total;
   }
 
   public isPublic(): boolean {
